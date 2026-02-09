@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-
-const STORAGE_KEY = 'splitwise-lite-data-v1'
+import { createExpense, createParticipants, deleteParticipant, fetchData } from './lib/dataApi'
+import { hasSupabaseEnv } from './lib/supabase'
 
 const ADMIN_CREDENTIALS = {
   username: 'admin',
@@ -37,25 +37,6 @@ const money = new Intl.NumberFormat('en-US', {
   currency: 'USD',
   minimumFractionDigits: 2,
 })
-
-function useLocalState(key, fallback) {
-  const [value, setValue] = useState(() => {
-    const saved = localStorage.getItem(key)
-    if (!saved) return fallback
-
-    try {
-      return JSON.parse(saved)
-    } catch {
-      return fallback
-    }
-  })
-
-  useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(value))
-  }, [key, value])
-
-  return [value, setValue]
-}
 
 function buildSettlements(expenses, participants) {
   const participantIds = new Set(participants.map((participant) => participant.id))
@@ -108,8 +89,33 @@ function buildSettlements(expenses, participants) {
 }
 
 function App() {
-  const [data, setData] = useLocalState(STORAGE_KEY, INITIAL_DATA)
+  const [data, setData] = useState(INITIAL_DATA)
   const [auth, setAuth] = useState({ role: null, participantId: '' })
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [errorText, setErrorText] = useState('')
+
+  const loadData = async () => {
+    if (!hasSupabaseEnv) {
+      setIsLoading(false)
+      return
+    }
+
+    try {
+      setIsLoading(true)
+      const remoteData = await fetchData()
+      setData(remoteData)
+      setErrorText('')
+    } catch {
+      setErrorText('Failed to load shared data from Supabase.')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadData()
+  }, [])
 
   const settlements = useMemo(
     () => buildSettlements(data.expenses, data.participants),
@@ -121,61 +127,66 @@ function App() {
     return new Map(entries)
   }, [data.participants])
 
-  const addParticipants = (names) => {
-    const participantsToAdd = names
+  const addParticipants = async (names) => {
+    const cleanNames = names
       .map((name) => name.trim())
       .filter(Boolean)
-      .map((name) => ({
-        id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        name,
-      }))
+    if (cleanNames.length === 0) return
 
-    if (participantsToAdd.length === 0) return
-
-    setData((current) => ({
-      ...current,
-      participants: [...current.participants, ...participantsToAdd],
-    }))
-  }
-
-  const addExpense = (expenseInput) => {
-    const involved = expenseInput.participantIds.includes(expenseInput.paidBy)
-      ? expenseInput.participantIds
-      : [...expenseInput.participantIds, expenseInput.paidBy]
-
-    const expense = {
-      id: `e-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      title: expenseInput.title.trim(),
-      amount: Number(expenseInput.amount),
-      paidBy: expenseInput.paidBy,
-      participantIds: involved,
-      note: expenseInput.note.trim(),
-      createdAt: new Date().toISOString(),
+    try {
+      setIsSaving(true)
+      await createParticipants(cleanNames)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to add participant(s).')
+    } finally {
+      setIsSaving(false)
     }
-
-    setData((current) => ({ ...current, expenses: [expense, ...current.expenses] }))
   }
 
-  const deleteParticipant = (participantId) => {
-    setData((current) => {
-      const participants = current.participants.filter((participant) => participant.id !== participantId)
+  const addExpense = async (expenseInput) => {
+    try {
+      setIsSaving(true)
+      await createExpense(expenseInput)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to create expense.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
 
-      const expenses = current.expenses
-        .map((expense) => {
-          if (expense.paidBy === participantId) return null
-
-          const participantIds = expense.participantIds.filter((id) => id !== participantId)
-          if (participantIds.length === 0) return null
-
-          return { ...expense, participantIds }
-        })
-        .filter(Boolean)
-
-      return { ...current, participants, expenses }
-    })
+  const removeParticipant = async (participantId) => {
+    try {
+      setIsSaving(true)
+      await deleteParticipant(participantId)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to delete participant.')
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const handleLogout = () => setAuth({ role: null, participantId: '' })
+
+  if (!hasSupabaseEnv) {
+    return <SetupPanel />
+  }
+
+  if (isLoading) {
+    return (
+      <main className="shell">
+        <section className="panel pop-in">
+          <h2>Connecting to shared data...</h2>
+          <p className="hint">Please wait while SplitNest loads your workspace.</p>
+        </section>
+      </main>
+    )
+  }
 
   return (
     <main className="shell">
@@ -190,6 +201,12 @@ function App() {
           </button>
         )}
       </header>
+
+      {errorText && (
+        <section className="panel">
+          <p className="error-text">{errorText}</p>
+        </section>
+      )}
 
       {!auth.role ? (
         <LoginPanel
@@ -207,8 +224,9 @@ function App() {
           expenses={data.expenses}
           participantById={participantById}
           onAddParticipants={addParticipants}
-          onDeleteParticipant={deleteParticipant}
+          onDeleteParticipant={removeParticipant}
           onAddExpense={addExpense}
+          isSaving={isSaving}
         />
       ) : (
         <UserDashboard
@@ -219,6 +237,26 @@ function App() {
           onSelectParticipant={(id) => setAuth((current) => ({ ...current, participantId: id }))}
         />
       )}
+    </main>
+  )
+}
+
+function SetupPanel() {
+  return (
+    <main className="shell">
+      <section className="panel pop-in">
+        <h2>Supabase setup needed</h2>
+        <p className="hint">Add these values in your `.env` and Vercel project settings:</p>
+        <ul className="list">
+          <li>
+            <code>VITE_SUPABASE_URL</code>
+          </li>
+          <li>
+            <code>VITE_SUPABASE_ANON_KEY</code>
+          </li>
+        </ul>
+        <p className="hint">After adding them, restart dev server or redeploy.</p>
+      </section>
     </main>
   )
 }
@@ -277,6 +315,7 @@ function AdminDashboard({
   onAddParticipants,
   onDeleteParticipant,
   onAddExpense,
+  isSaving,
 }) {
   const [participantName, setParticipantName] = useState('')
   const [title, setTitle] = useState('')
@@ -355,7 +394,7 @@ function AdminDashboard({
             onChange={(event) => setParticipantName(event.target.value)}
             placeholder="Alex, Maya, Jordan"
           />
-          <button className="primary-btn" type="submit">
+          <button className="primary-btn" type="submit" disabled={isSaving}>
             Add
           </button>
         </form>
@@ -367,6 +406,7 @@ function AdminDashboard({
               <button
                 className="danger-btn"
                 type="button"
+                disabled={isSaving}
                 onClick={() => handleDeleteParticipant(participant)}
               >
                 Delete
@@ -426,7 +466,7 @@ function AdminDashboard({
             <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional" />
           </label>
 
-          <button className="primary-btn" type="submit">
+          <button className="primary-btn" type="submit" disabled={isSaving}>
             Save expense
           </button>
         </form>
