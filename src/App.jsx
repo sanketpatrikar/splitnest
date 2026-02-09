@@ -5,12 +5,12 @@ const STORAGE_KEY = 'splitwise-lite-data-v1'
 
 const ADMIN_CREDENTIALS = {
   username: 'admin',
-  password: 'admin123',
+  password: 'i_am_admin!',
 }
 
 const USER_CREDENTIALS = {
-  username: 'group',
-  password: 'group123',
+  username: 'user',
+  password: 'user',
 }
 
 const INITIAL_DATA = {
@@ -275,16 +275,6 @@ function LoginPanel({ participantCount, onAdminLogin, onUserLogin }) {
           Continue
         </button>
       </form>
-
-      <div className="credential-box">
-        <p>Demo credentials:</p>
-        <p>
-          Admin: <code>admin / admin123</code>
-        </p>
-        <p>
-          Shared user: <code>group / group123</code>
-        </p>
-      </div>
     </section>
   )
 }
