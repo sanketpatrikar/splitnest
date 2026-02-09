@@ -121,10 +121,21 @@ function App() {
     return new Map(entries)
   }, [data.participants])
 
-  const addParticipant = (name) => {
-    const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    const participant = { id, name: name.trim() }
-    setData((current) => ({ ...current, participants: [...current.participants, participant] }))
+  const addParticipants = (names) => {
+    const participantsToAdd = names
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .map((name) => ({
+        id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name,
+      }))
+
+    if (participantsToAdd.length === 0) return
+
+    setData((current) => ({
+      ...current,
+      participants: [...current.participants, ...participantsToAdd],
+    }))
   }
 
   const addExpense = (expenseInput) => {
@@ -195,7 +206,7 @@ function App() {
           participants={data.participants}
           expenses={data.expenses}
           participantById={participantById}
-          onAddParticipant={addParticipant}
+          onAddParticipants={addParticipants}
           onDeleteParticipant={deleteParticipant}
           onAddExpense={addExpense}
         />
@@ -263,7 +274,7 @@ function AdminDashboard({
   participants,
   expenses,
   participantById,
-  onAddParticipant,
+  onAddParticipants,
   onDeleteParticipant,
   onAddExpense,
 }) {
@@ -294,9 +305,14 @@ function AdminDashboard({
 
   const submitParticipant = (event) => {
     event.preventDefault()
-    const clean = participantName.trim()
-    if (!clean) return
-    onAddParticipant(clean)
+    const parsed = participantName
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+    if (parsed.length === 0) return
+
+    onAddParticipants(parsed)
     setParticipantName('')
   }
 
@@ -337,12 +353,13 @@ function AdminDashboard({
           <input
             value={participantName}
             onChange={(event) => setParticipantName(event.target.value)}
-            placeholder="Add participant name"
+            placeholder="Alex, Maya, Jordan"
           />
           <button className="primary-btn" type="submit">
             Add
           </button>
         </form>
+        <p className="hint">Add one or many participants separated by commas.</p>
         <ul className="list">
           {participants.map((participant) => (
             <li key={participant.id}>
