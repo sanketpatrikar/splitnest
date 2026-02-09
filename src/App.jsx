@@ -182,7 +182,6 @@ function App() {
 
       {!auth.role ? (
         <LoginPanel
-          participantCount={data.participants.length}
           onAdminLogin={() => setAuth({ role: 'admin', participantId: '' })}
           onUserLogin={() =>
             setAuth({
@@ -213,46 +212,30 @@ function App() {
   )
 }
 
-function LoginPanel({ participantCount, onAdminLogin, onUserLogin }) {
-  const [mode, setMode] = useState('admin')
+function LoginPanel({ onAdminLogin, onUserLogin }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
 
   const submit = (event) => {
     event.preventDefault()
-    const credentials = mode === 'admin' ? ADMIN_CREDENTIALS : USER_CREDENTIALS
-
-    if (username !== credentials.username || password !== credentials.password) {
-      setError('Invalid credentials.')
+    if (username === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
+      setError('')
+      onAdminLogin()
       return
     }
 
-    setError('')
-    if (mode === 'admin') {
-      onAdminLogin()
-    } else {
+    if (username === USER_CREDENTIALS.username && password === USER_CREDENTIALS.password) {
+      setError('')
       onUserLogin()
+      return
     }
+
+    setError('Invalid credentials.')
   }
 
   return (
     <section className="panel login-panel pop-in">
-      <div className="mode-toggle" role="tablist" aria-label="Login type">
-        <button
-          className={mode === 'admin' ? 'mode-btn active' : 'mode-btn'}
-          onClick={() => setMode('admin')}
-        >
-          Admin Login
-        </button>
-        <button
-          className={mode === 'user' ? 'mode-btn active' : 'mode-btn'}
-          onClick={() => setMode('user')}
-        >
-          Shared User Login
-        </button>
-      </div>
-
       <form className="stack" onSubmit={submit}>
         <label>
           Username
@@ -267,11 +250,8 @@ function LoginPanel({ participantCount, onAdminLogin, onUserLogin }) {
             required
           />
         </label>
-        {mode === 'user' && participantCount === 0 && (
-          <p className="hint">No participants created yet. Ask the admin to create them first.</p>
-        )}
         {error && <p className="error-text">{error}</p>}
-        <button className="primary-btn" type="submit" disabled={mode === 'user' && participantCount === 0}>
+        <button className="primary-btn" type="submit">
           Continue
         </button>
       </form>
