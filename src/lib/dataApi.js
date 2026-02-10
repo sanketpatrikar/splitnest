@@ -123,6 +123,11 @@ export async function updateExpense(input) {
   if (joinError) throw joinError
 }
 
+export async function deleteExpense(expenseId) {
+  const { error } = await supabase.from('expenses').delete().eq('id', expenseId)
+  if (error) throw error
+}
+
 export async function createPayment(input) {
   const { error } = await supabase.from('payments').insert({
     from_participant_id: input.from,

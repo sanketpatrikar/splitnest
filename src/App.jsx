@@ -4,6 +4,7 @@ import {
   createExpense,
   createParticipants,
   createPayment,
+  deleteExpense,
   deleteParticipant,
   fetchData,
   updateExpense,
@@ -60,7 +61,7 @@ function buildSettlements(expenses, participants, payments) {
 
     if (!amount || amount <= 0 || !payer || !participantIds.has(payer) || debtors.length === 0) return
 
-    const split = amount / debtors.length
+    const split = amount / (debtors.length + 1)
 
     debtors.forEach((participantId) => {
       addDebt(participantId, payer, split)
@@ -211,6 +212,19 @@ function App() {
     }
   }
 
+  const removeExpense = async (expenseId) => {
+    try {
+      setIsSaving(true)
+      await deleteExpense(expenseId)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to delete expense.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const markSettlementPaid = async (settlement) => {
     try {
       setIsSaving(true)
@@ -294,6 +308,7 @@ function App() {
           participantById={participantById}
           onAddParticipants={addParticipants}
           onDeleteParticipant={removeParticipant}
+          onDeleteExpense={removeExpense}
           onAddExpense={addExpense}
           onEditExpense={editExpense}
           onMarkSettlementPaid={markSettlementPaid}
@@ -379,6 +394,7 @@ function AdminDashboard({
   participantById,
   onAddParticipants,
   onDeleteParticipant,
+  onDeleteExpense,
   onAddExpense,
   onEditExpense,
   onMarkSettlementPaid,
@@ -491,6 +507,15 @@ function AdminDashboard({
     )
     if (!ok) return
     onMarkSettlementPaid(item)
+  }
+
+  const handleDeleteExpense = (expense) => {
+    const ok = window.confirm(`Delete expense "${expense.title}"?`)
+    if (!ok) return
+    onDeleteExpense(expense.id)
+    if (editingExpenseId === expense.id) {
+      resetExpenseForm()
+    }
   }
 
   const allSelected =
@@ -636,10 +661,16 @@ function AdminDashboard({
               <li key={expense.id}>
                 <div>
                   <p className="expense-title">{expense.title}</p>
-                  <p className="hint">
-                    Paid by {participantById.get(expense.paidBy)?.name || 'Unknown'} • Split among{' '}
-                    {expense.participantIds.length}
-                  </p>
+                  {(() => {
+                    const uniqueDebtors = new Set(expense.participantIds.filter((id) => id !== expense.paidBy))
+                    const splitCount = uniqueDebtors.size + 1
+                    return (
+                      <p className="hint">
+                        Paid by {participantById.get(expense.paidBy)?.name || 'Unknown'} • Split among {splitCount}{' '}
+                        (includes payer)
+                      </p>
+                    )
+                  })()}
                   {expense.note && <p className="hint">{expense.note}</p>}
                 </div>
                 <div className="inline-form compact-actions">
@@ -651,6 +682,14 @@ function AdminDashboard({
                     disabled={isSaving}
                   >
                     Edit
+                  </button>
+                  <button
+                    className="danger-btn"
+                    type="button"
+                    onClick={() => handleDeleteExpense(expense)}
+                    disabled={isSaving}
+                  >
+                    Delete
                   </button>
                 </div>
               </li>
