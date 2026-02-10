@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-import { createExpense, createParticipants, deleteParticipant, fetchData } from './lib/dataApi'
+import {
+  createExpense,
+  createParticipants,
+  createPayment,
+  deleteParticipant,
+  fetchData,
+  updateExpense,
+} from './lib/dataApi'
 import { hasSupabaseEnv } from './lib/supabase'
 
 const ADMIN_CREDENTIALS = {
   username: 'admin',
   password: 'i_am_admin!',
-}
-
-const USER_CREDENTIALS = {
-  username: 'user',
-  password: 'user',
 }
 
 const INITIAL_DATA = {
@@ -30,15 +32,16 @@ const INITIAL_DATA = {
       createdAt: new Date().toISOString(),
     },
   ],
+  payments: [],
 }
 
 const money = new Intl.NumberFormat('en-US', {
   style: 'currency',
-  currency: 'USD',
+  currency: 'INR',
   minimumFractionDigits: 2,
 })
 
-function buildSettlements(expenses, participants) {
+function buildSettlements(expenses, participants, payments) {
   const participantIds = new Set(participants.map((participant) => participant.id))
   const raw = new Map()
 
@@ -51,16 +54,26 @@ function buildSettlements(expenses, participants) {
   expenses.forEach((expense) => {
     const amount = Number(expense.amount)
     const payer = expense.paidBy
-    const involved = expense.participantIds.filter((id) => participantIds.has(id))
+    const debtors = expense.participantIds.filter(
+      (id) => participantIds.has(id) && id !== payer,
+    )
 
-    if (!amount || amount <= 0 || !payer || involved.length === 0) return
+    if (!amount || amount <= 0 || !payer || !participantIds.has(payer) || debtors.length === 0) return
 
-    const split = amount / involved.length
+    const split = amount / debtors.length
 
-    involved.forEach((participantId) => {
-      if (participantId === payer) return
+    debtors.forEach((participantId) => {
       addDebt(participantId, payer, split)
     })
+  })
+
+  payments.forEach((payment) => {
+    const amount = Number(payment.amount)
+    if (!amount || amount <= 0) return
+    if (!participantIds.has(payment.from) || !participantIds.has(payment.to)) return
+    if (payment.from === payment.to) return
+
+    addDebt(payment.to, payment.from, amount)
   })
 
   const settlements = []
@@ -90,7 +103,9 @@ function buildSettlements(expenses, participants) {
 
 function App() {
   const [data, setData] = useState(INITIAL_DATA)
-  const [auth, setAuth] = useState({ role: null, participantId: '' })
+  const [selectedParticipantId, setSelectedParticipantId] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [errorText, setErrorText] = useState('')
@@ -117,9 +132,21 @@ function App() {
     loadData()
   }, [])
 
+  useEffect(() => {
+    if (data.participants.length === 0) {
+      setSelectedParticipantId('')
+      return
+    }
+
+    const selectedExists = data.participants.some((participant) => participant.id === selectedParticipantId)
+    if (!selectedExists) {
+      setSelectedParticipantId(data.participants[0].id)
+    }
+  }, [data.participants, selectedParticipantId])
+
   const settlements = useMemo(
-    () => buildSettlements(data.expenses, data.participants),
-    [data.expenses, data.participants],
+    () => buildSettlements(data.expenses, data.participants, data.payments || []),
+    [data.expenses, data.participants, data.payments],
   )
 
   const participantById = useMemo(() => {
@@ -158,6 +185,19 @@ function App() {
     }
   }
 
+  const editExpense = async (expenseInput) => {
+    try {
+      setIsSaving(true)
+      await updateExpense(expenseInput)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to update expense.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const removeParticipant = async (participantId) => {
     try {
       setIsSaving(true)
@@ -171,7 +211,23 @@ function App() {
     }
   }
 
-  const handleLogout = () => setAuth({ role: null, participantId: '' })
+  const markSettlementPaid = async (settlement) => {
+    try {
+      setIsSaving(true)
+      await createPayment(settlement)
+      await loadData()
+      setErrorText('')
+    } catch {
+      setErrorText('Unable to mark payment as settled.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleAdminLogout = () => {
+    setIsAdmin(false)
+    setIsAdminLoginOpen(false)
+  }
 
   if (!hasSupabaseEnv) {
     return <SetupPanel />
@@ -195,9 +251,13 @@ function App() {
           <p className="eyebrow">Shared House Ledger</p>
           <h1>SplitNest</h1>
         </div>
-        {auth.role && (
-          <button className="ghost-btn" onClick={handleLogout}>
-            Log out
+        {isAdmin ? (
+          <button className="ghost-btn" onClick={handleAdminLogout}>
+            Admin logout
+          </button>
+        ) : (
+          <button className="ghost-btn" onClick={() => setIsAdminLoginOpen((open) => !open)}>
+            Admin
           </button>
         )}
       </header>
@@ -208,33 +268,36 @@ function App() {
         </section>
       )}
 
-      {!auth.role ? (
-        <LoginPanel
-          onAdminLogin={() => setAuth({ role: 'admin', participantId: '' })}
-          onUserLogin={() =>
-            setAuth({
-              role: 'user',
-              participantId: data.participants[0]?.id || '',
-            })
-          }
+      {isAdminLoginOpen && !isAdmin && (
+        <AdminLoginPanel
+          onClose={() => setIsAdminLoginOpen(false)}
+          onAdminLogin={() => {
+            setIsAdmin(true)
+            setIsAdminLoginOpen(false)
+          }}
         />
-      ) : auth.role === 'admin' ? (
+      )}
+
+      <UserDashboard
+        participants={data.participants}
+        settlements={settlements}
+        participantById={participantById}
+        selectedParticipantId={selectedParticipantId}
+        onSelectParticipant={setSelectedParticipantId}
+      />
+
+      {isAdmin && (
         <AdminDashboard
           participants={data.participants}
           expenses={data.expenses}
+          settlements={settlements}
           participantById={participantById}
           onAddParticipants={addParticipants}
           onDeleteParticipant={removeParticipant}
           onAddExpense={addExpense}
+          onEditExpense={editExpense}
+          onMarkSettlementPaid={markSettlementPaid}
           isSaving={isSaving}
-        />
-      ) : (
-        <UserDashboard
-          participants={data.participants}
-          settlements={settlements}
-          participantById={participantById}
-          selectedParticipantId={auth.participantId}
-          onSelectParticipant={(id) => setAuth((current) => ({ ...current, participantId: id }))}
         />
       )}
     </main>
@@ -261,30 +324,26 @@ function SetupPanel() {
   )
 }
 
-function LoginPanel({ onAdminLogin, onUserLogin }) {
+function AdminLoginPanel({ onAdminLogin, onClose }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
 
   const submit = (event) => {
     event.preventDefault()
+
     if (username === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
       setError('')
       onAdminLogin()
       return
     }
 
-    if (username === USER_CREDENTIALS.username && password === USER_CREDENTIALS.password) {
-      setError('')
-      onUserLogin()
-      return
-    }
-
-    setError('Invalid credentials.')
+    setError('Invalid admin credentials.')
   }
 
   return (
     <section className="panel login-panel pop-in">
+      <h2>Admin login</h2>
       <form className="stack" onSubmit={submit}>
         <label>
           Username
@@ -300,9 +359,14 @@ function LoginPanel({ onAdminLogin, onUserLogin }) {
           />
         </label>
         {error && <p className="error-text">{error}</p>}
-        <button className="primary-btn" type="submit">
-          Continue
-        </button>
+        <div className="inline-form">
+          <button className="primary-btn" type="submit">
+            Continue
+          </button>
+          <button className="ghost-btn" type="button" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
       </form>
     </section>
   )
@@ -311,35 +375,60 @@ function LoginPanel({ onAdminLogin, onUserLogin }) {
 function AdminDashboard({
   participants,
   expenses,
+  settlements,
   participantById,
   onAddParticipants,
   onDeleteParticipant,
   onAddExpense,
+  onEditExpense,
+  onMarkSettlementPaid,
   isSaving,
 }) {
   const [participantName, setParticipantName] = useState('')
+  const [editingExpenseId, setEditingExpenseId] = useState('')
   const [title, setTitle] = useState('')
   const [amount, setAmount] = useState('')
   const [paidBy, setPaidBy] = useState(participants[0]?.id || '')
   const [selectedParticipants, setSelectedParticipants] = useState([])
   const [note, setNote] = useState('')
 
-  useEffect(() => {
-    if (!participants.some((participant) => participant.id === paidBy)) {
-      setPaidBy(participants[0]?.id || '')
-    }
-  }, [participants, paidBy])
+  const safePaidBy = participants.some((participant) => participant.id === paidBy)
+    ? paidBy
+    : participants[0]?.id || ''
 
-  useEffect(() => {
-    setSelectedParticipants((current) =>
-      current.filter((id) => participants.some((participant) => participant.id === id)),
-    )
-  }, [participants])
+  const validSelectedParticipants = selectedParticipants.filter((id) =>
+    participants.some((participant) => participant.id === id) && id !== safePaidBy,
+  )
+
+  const selectableParticipants = participants.filter((participant) => participant.id !== safePaidBy)
+
+  const resetExpenseForm = () => {
+    setEditingExpenseId('')
+    setTitle('')
+    setAmount('')
+    setSelectedParticipants([])
+    setNote('')
+  }
 
   const toggleSelected = (id) => {
     setSelectedParticipants((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
     )
+  }
+
+  const toggleSelectAll = () => {
+    const allIds = selectableParticipants.map((participant) => participant.id)
+    const hasAll = allIds.length > 0 && allIds.every((id) => validSelectedParticipants.includes(id))
+    setSelectedParticipants(hasAll ? [] : allIds)
+  }
+
+  const startEditExpense = (expense) => {
+    setEditingExpenseId(expense.id)
+    setTitle(expense.title)
+    setAmount(String(expense.amount))
+    setPaidBy(expense.paidBy)
+    setSelectedParticipants(expense.participantIds.filter((id) => id !== expense.paidBy))
+    setNote(expense.note || '')
   }
 
   const submitParticipant = (event) => {
@@ -358,22 +447,32 @@ function AdminDashboard({
   const submitExpense = (event) => {
     event.preventDefault()
 
-    if (!title.trim() || !amount || !paidBy || selectedParticipants.length === 0) {
+    if (!title.trim() || !amount || !safePaidBy || validSelectedParticipants.length === 0) {
+      return
+    }
+
+    if (editingExpenseId) {
+      onEditExpense({
+        id: editingExpenseId,
+        title,
+        amount,
+        paidBy: safePaidBy,
+        participantIds: validSelectedParticipants,
+        note,
+      })
+      resetExpenseForm()
       return
     }
 
     onAddExpense({
       title,
       amount,
-      paidBy,
-      participantIds: selectedParticipants,
+      paidBy: safePaidBy,
+      participantIds: validSelectedParticipants,
       note,
     })
 
-    setTitle('')
-    setAmount('')
-    setSelectedParticipants([])
-    setNote('')
+    resetExpenseForm()
   }
 
   const handleDeleteParticipant = (participant) => {
@@ -383,6 +482,20 @@ function AdminDashboard({
     if (!ok) return
     onDeleteParticipant(participant.id)
   }
+
+  const handleSettle = (item) => {
+    const fromName = participantById.get(item.from)?.name || 'Unknown'
+    const toName = participantById.get(item.to)?.name || 'Unknown'
+    const ok = window.confirm(
+      `Confirm settlement: ${fromName} paid ${money.format(item.amount)} to ${toName}?`,
+    )
+    if (!ok) return
+    onMarkSettlementPaid(item)
+  }
+
+  const allSelected =
+    selectableParticipants.length > 0 &&
+    selectableParticipants.every((participant) => validSelectedParticipants.includes(participant.id))
 
   return (
     <section className="dashboard grid-two">
@@ -417,7 +530,7 @@ function AdminDashboard({
       </article>
 
       <article className="panel pop-in delay-2">
-        <h2>Create expense</h2>
+        <h2>{editingExpenseId ? 'Edit expense' : 'Create expense'}</h2>
         <form className="stack" onSubmit={submitExpense}>
           <label>
             Expense title
@@ -436,7 +549,7 @@ function AdminDashboard({
           </label>
           <label>
             Paid by
-            <select value={paidBy} onChange={(event) => setPaidBy(event.target.value)} required>
+            <select value={safePaidBy} onChange={(event) => setPaidBy(event.target.value)} required>
               {participants.map((participant) => (
                 <option key={participant.id} value={participant.id}>
                   {participant.name}
@@ -447,12 +560,17 @@ function AdminDashboard({
 
           <fieldset>
             <legend>Included participants</legend>
+            <p className="hint">Payer is excluded automatically.</p>
             <div className="checkbox-grid">
-              {participants.map((participant) => (
+              <label className="check-item">
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                All
+              </label>
+              {selectableParticipants.map((participant) => (
                 <label key={participant.id} className="check-item">
                   <input
                     type="checkbox"
-                    checked={selectedParticipants.includes(participant.id)}
+                    checked={validSelectedParticipants.includes(participant.id)}
                     onChange={() => toggleSelected(participant.id)}
                   />
                   {participant.name}
@@ -467,9 +585,45 @@ function AdminDashboard({
           </label>
 
           <button className="primary-btn" type="submit" disabled={isSaving}>
-            Save expense
+            {editingExpenseId ? 'Update expense' : 'Save expense'}
           </button>
+          {editingExpenseId && (
+            <button className="ghost-btn" type="button" onClick={resetExpenseForm} disabled={isSaving}>
+              Cancel edit
+            </button>
+          )}
         </form>
+      </article>
+
+      <article className="panel full-width pop-in delay-3">
+        <h2>Open balances</h2>
+        {settlements.length === 0 ? (
+          <p className="hint">All balances are clear.</p>
+        ) : (
+          <ul className="expense-list">
+            {settlements.map((item) => (
+              <li key={`${item.from}-${item.to}`}>
+                <div>
+                  <p className="expense-title">
+                    {participantById.get(item.from)?.name || 'Unknown'} owes{' '}
+                    {participantById.get(item.to)?.name || 'Unknown'}
+                  </p>
+                </div>
+                <div className="inline-form compact-actions">
+                  <strong>{money.format(item.amount)}</strong>
+                  <button
+                    className="primary-btn"
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => handleSettle(item)}
+                  >
+                    Mark paid
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </article>
 
       <article className="panel full-width pop-in delay-3">
@@ -488,7 +642,17 @@ function AdminDashboard({
                   </p>
                   {expense.note && <p className="hint">{expense.note}</p>}
                 </div>
-                <strong>{money.format(expense.amount)}</strong>
+                <div className="inline-form compact-actions">
+                  <strong>{money.format(expense.amount)}</strong>
+                  <button
+                    className="ghost-btn"
+                    type="button"
+                    onClick={() => startEditExpense(expense)}
+                    disabled={isSaving}
+                  >
+                    Edit
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -505,17 +669,11 @@ function UserDashboard({
   selectedParticipantId,
   onSelectParticipant,
 }) {
-  useEffect(() => {
-    if (!selectedParticipantId && participants[0]) {
-      onSelectParticipant(participants[0].id)
-    }
-  }, [selectedParticipantId, participants, onSelectParticipant])
-
   if (participants.length === 0) {
     return (
-      <section className="panel">
-        <h2>User view</h2>
-        <p className="hint">No participants available yet. Ask the admin to add participants.</p>
+      <section className="panel pop-in">
+        <h2>Choose who you are</h2>
+        <p className="hint">No participants yet. Ask admin to add names first.</p>
       </section>
     )
   }
@@ -531,7 +689,7 @@ function UserDashboard({
   return (
     <section className="dashboard stack pop-in">
       <article className="panel">
-        <h2>Choose your identity</h2>
+        <h2>Choose who you are</h2>
         <select value={selected} onChange={(event) => onSelectParticipant(event.target.value)}>
           {participants.map((participant) => (
             <option key={participant.id} value={participant.id}>

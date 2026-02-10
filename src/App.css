@@ -151,6 +151,12 @@ legend {
   cursor: not-allowed;
 }
 
+.ghost-btn:disabled,
+.danger-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .list,
 .expense-list {
   list-style: none;
@@ -175,6 +181,10 @@ legend {
 .expense-title {
   margin: 0;
   font-weight: 600;
+}
+
+.compact-actions {
+  align-items: center;
 }
 
 .hint {

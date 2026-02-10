@@ -12,21 +12,37 @@ function mapExpense(row) {
   }
 }
 
+function mapPayment(row) {
+  return {
+    id: row.id,
+    from: row.from_participant_id,
+    to: row.to_participant_id,
+    amount: Number(row.amount),
+    createdAt: row.created_at,
+  }
+}
+
 export async function fetchData() {
-  const [participantsResult, expensesResult] = await Promise.all([
+  const [participantsResult, expensesResult, paymentsResult] = await Promise.all([
     supabase.from('participants').select('id, name').order('created_at', { ascending: true }),
     supabase
       .from('expenses')
       .select('id, title, amount, paid_by, note, created_at, expense_participants(participant_id)')
       .order('created_at', { ascending: false }),
+    supabase
+      .from('payments')
+      .select('id, from_participant_id, to_participant_id, amount, created_at')
+      .order('created_at', { ascending: false }),
   ])
 
   if (participantsResult.error) throw participantsResult.error
   if (expensesResult.error) throw expensesResult.error
+  if (paymentsResult.error) throw paymentsResult.error
 
   return {
     participants: participantsResult.data,
     expenses: expensesResult.data.map(mapExpense),
+    payments: paymentsResult.data.map(mapPayment),
   }
 }
 
@@ -46,9 +62,7 @@ export async function deleteParticipant(participantId) {
 }
 
 export async function createExpense(input) {
-  const participantIds = input.participantIds.includes(input.paidBy)
-    ? input.participantIds
-    : [...input.participantIds, input.paidBy]
+  const participantIds = [...new Set(input.participantIds.filter((id) => id !== input.paidBy))]
 
   const { data: insertedExpense, error: expenseError } = await supabase
     .from('expenses')
@@ -63,6 +77,8 @@ export async function createExpense(input) {
 
   if (expenseError) throw expenseError
 
+  if (participantIds.length === 0) return
+
   const joinRows = participantIds.map((participantId) => ({
     expense_id: insertedExpense.id,
     participant_id: participantId,
@@ -71,4 +87,48 @@ export async function createExpense(input) {
   const { error: joinError } = await supabase.from('expense_participants').insert(joinRows)
 
   if (joinError) throw joinError
+}
+
+export async function updateExpense(input) {
+  const participantIds = [...new Set(input.participantIds.filter((id) => id !== input.paidBy))]
+
+  const { error: expenseError } = await supabase
+    .from('expenses')
+    .update({
+      title: input.title.trim(),
+      amount: Number(input.amount),
+      paid_by: input.paidBy,
+      note: input.note.trim(),
+    })
+    .eq('id', input.id)
+
+  if (expenseError) throw expenseError
+
+  const { error: deleteJoinError } = await supabase
+    .from('expense_participants')
+    .delete()
+    .eq('expense_id', input.id)
+
+  if (deleteJoinError) throw deleteJoinError
+
+  if (participantIds.length === 0) return
+
+  const joinRows = participantIds.map((participantId) => ({
+    expense_id: input.id,
+    participant_id: participantId,
+  }))
+
+  const { error: joinError } = await supabase.from('expense_participants').insert(joinRows)
+
+  if (joinError) throw joinError
+}
+
+export async function createPayment(input) {
+  const { error } = await supabase.from('payments').insert({
+    from_participant_id: input.from,
+    to_participant_id: input.to,
+    amount: Number(input.amount),
+  })
+
+  if (error) throw error
 }
