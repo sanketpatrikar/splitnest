@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   createExpense,
@@ -431,6 +431,17 @@ function AdminDashboard({
   const [paidBy, setPaidBy] = useState(participants[0]?.id || '')
   const [selectedParticipants, setSelectedParticipants] = useState([])
   const [note, setNote] = useState('')
+  const [isExpenseFormHighlighted, setIsExpenseFormHighlighted] = useState(false)
+  const expenseFormRef = useRef(null)
+  const highlightTimeoutRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const safePaidBy = participants.some((participant) => participant.id === paidBy)
     ? paidBy
@@ -469,6 +480,19 @@ function AdminDashboard({
     setPaidBy(expense.paidBy)
     setSelectedParticipants(expense.participantIds.filter((id) => id !== expense.paidBy))
     setNote(expense.note || '')
+
+    if (expenseFormRef.current) {
+      expenseFormRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+
+    setIsExpenseFormHighlighted(true)
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current)
+    }
+    highlightTimeoutRef.current = setTimeout(() => {
+      setIsExpenseFormHighlighted(false)
+      highlightTimeoutRef.current = null
+    }, 900)
   }
 
   const submitParticipant = (event) => {
@@ -578,7 +602,11 @@ function AdminDashboard({
         </ul>
       </article>
 
-      <article className="panel pop-in delay-2">
+      <article
+        id="expense-form"
+        ref={expenseFormRef}
+        className={`panel pop-in delay-2${isExpenseFormHighlighted ? ' attention-pulse' : ''}`}
+      >
         <h2>{editingExpenseId ? 'Edit expense' : 'Create expense'}</h2>
         <form className="stack" onSubmit={submitExpense}>
           <label>
