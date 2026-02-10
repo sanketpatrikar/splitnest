@@ -112,6 +112,108 @@ function buildExpenseBalanceGroups(expenses) {
     .filter(Boolean)
 }
 
+function applyPairwiseAutoSettlement(expenseBalances) {
+  const clonedGroups = expenseBalances.map((group) => ({
+    ...group,
+    items: group.items.map((item) => ({
+      ...item,
+      rawAmount: round2(item.amount),
+      amount: round2(item.amount),
+      autoSettled: 0,
+    })),
+    autoSettledTotal: 0,
+  }))
+
+  const pairBuckets = new Map()
+
+  clonedGroups.forEach((group, groupIndex) => {
+    group.items.forEach((item, itemIndex) => {
+      const left = item.from < item.to ? item.from : item.to
+      const right = item.from < item.to ? item.to : item.from
+      const key = `${left}::${right}`
+      const isForward = item.from === left && item.to === right
+
+      if (!pairBuckets.has(key)) {
+        pairBuckets.set(key, {
+          left,
+          right,
+          forward: [],
+          reverse: [],
+        })
+      }
+
+      const bucket = pairBuckets.get(key)
+      const ref = { groupIndex, itemIndex }
+
+      if (isForward) {
+        bucket.forward.push(ref)
+      } else {
+        bucket.reverse.push(ref)
+      }
+    })
+  })
+
+  const pairAdjustments = []
+
+  const applyToRefs = (refs, settleAmount) => {
+    let remaining = settleAmount
+
+    refs.forEach((ref) => {
+      if (remaining <= 0.009) return
+
+      const item = clonedGroups[ref.groupIndex].items[ref.itemIndex]
+      const deduct = round2(Math.min(item.amount, remaining))
+      if (deduct <= 0) return
+
+      item.amount = round2(item.amount - deduct)
+      item.autoSettled = round2(item.autoSettled + deduct)
+      remaining = round2(remaining - deduct)
+    })
+  }
+
+  pairBuckets.forEach((bucket) => {
+    const totalForward = round2(
+      bucket.forward.reduce((sum, ref) => sum + clonedGroups[ref.groupIndex].items[ref.itemIndex].amount, 0),
+    )
+    const totalReverse = round2(
+      bucket.reverse.reduce((sum, ref) => sum + clonedGroups[ref.groupIndex].items[ref.itemIndex].amount, 0),
+    )
+
+    const settled = round2(Math.min(totalForward, totalReverse))
+    if (settled <= 0.009) return
+
+    applyToRefs(bucket.forward, settled)
+    applyToRefs(bucket.reverse, settled)
+
+    pairAdjustments.push({
+      from: bucket.left,
+      to: bucket.right,
+      amount: settled,
+    })
+  })
+
+  const adjustedGroups = clonedGroups
+    .map((group) => {
+      const items = group.items.filter((item) => item.amount > 0.009)
+      const autoSettledTotal = round2(group.items.reduce((sum, item) => sum + item.autoSettled, 0))
+
+      if (items.length === 0) return null
+
+      return {
+        ...group,
+        items,
+        totalPending: sumAmounts(items),
+        autoSettledTotal,
+      }
+    })
+    .filter(Boolean)
+
+  return {
+    expenseBalances: adjustedGroups,
+    pairAdjustments,
+  }
+}
+
 function groupBalancesForParticipant(expenseBalances, participantId, direction) {
   const isOutgoing = direction === 'outgoing'
 
@@ -130,6 +232,7 @@ function groupBalancesForParticipant(expenseBalances, participantId, direction) 
         ...group,
         items,
         amount: sumAmounts(items),
+        autoSettledTotal: round2(items.reduce((sum, item) => sum + Number(item.autoSettled || 0), 0)),
       }
     })
     .filter(Boolean)
@@ -183,9 +286,14 @@ function App() {
     return new Map(entries)
   }, [data.participants])
 
-  const expenseBalances = useMemo(
+  const rawExpenseBalances = useMemo(
     () => buildExpenseBalanceGroups(data.expenses || []),
     [data.expenses],
+  )
+
+  const { expenseBalances, pairAdjustments } = useMemo(
+    () => applyPairwiseAutoSettlement(rawExpenseBalances),
+    [rawExpenseBalances],
   )
 
   const addParticipants = async (names) => {
@@ -343,6 +451,7 @@ function App() {
       <UserDashboard
         participants={data.participants}
         expenseBalances={expenseBalances}
+        pairAdjustments={pairAdjustments}
         participantById={participantById}
         selectedParticipantId={selectedParticipantId}
         onSelectParticipant={setSelectedParticipantId}
@@ -353,6 +462,7 @@ function App() {
           participants={data.participants}
           expenses={data.expenses}
           expenseBalances={expenseBalances}
+          pairAdjustments={pairAdjustments}
           participantById={participantById}
           onAddParticipants={addParticipants}
           onDeleteParticipant={removeParticipant}
@@ -439,6 +549,7 @@ function AdminDashboard({
   participants,
   expenses,
   expenseBalances,
+  pairAdjustments,
   participantById,
   onAddParticipants,
   onDeleteParticipant,
@@ -727,6 +838,22 @@ function AdminDashboard({
 
       <article className="panel full-width pop-in delay-3">
         <h2>Open balances by expense</h2>
+        {pairAdjustments.length > 0 && (
+          <div className="hint-stack">
+            <p className="hint">Auto-settled opposite dues:</p>
+            <ul className="list compact-list">
+              {pairAdjustments.map((adjustment) => (
+                <li key={`adj-${adjustment.from}-${adjustment.to}`}>
+                  <span>
+                    {participantById.get(adjustment.from)?.name || 'Unknown'} {'<->'}{' '}
+                    {participantById.get(adjustment.to)?.name || 'Unknown'}
+                  </span>
+                  <strong>{money.format(adjustment.amount)}</strong>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {expenseBalances.length === 0 ? (
           <p className="hint">All balances are clear.</p>
         ) : (
@@ -739,6 +866,9 @@ function AdminDashboard({
                     Paid by {participantById.get(group.payer)?.name || 'Unknown'} • Pending{' '}
                     {money.format(group.totalPending)}
                   </p>
+                  {group.autoSettledTotal > 0 && (
+                    <p className="hint">Auto-settled in this expense: {money.format(group.autoSettledTotal)}</p>
+                  )}
                   {group.note && <p className="hint">{group.note}</p>}
                   <ul className="list inner-list">
                     {group.items.map((item) => (
@@ -749,8 +879,9 @@ function AdminDashboard({
                             {participantById.get(item.to)?.name || 'Unknown'}
                           </p>
                           <p className="hint">
-                            Original {money.format(item.fullShare)} • Paid {money.format(item.paidAmount)} • Remaining{' '}
-                            {money.format(item.amount)}
+                            Original {money.format(item.fullShare)}
+                            {item.autoSettled > 0 && ` • Auto-settled ${money.format(item.autoSettled)}`}
+                            {' • '}Paid {money.format(item.paidAmount)} • Remaining {money.format(item.amount)}
                           </p>
                           {item.kind === 'overpayment_return' && (
                             <p className="hint">Overpayment return</p>
@@ -828,6 +959,7 @@ function AdminDashboard({
 function UserDashboard({
   participants,
   expenseBalances,
+  pairAdjustments,
   participantById,
   selectedParticipantId,
   onSelectParticipant,
@@ -845,6 +977,12 @@ function UserDashboard({
 
   const outgoingByExpense = groupBalancesForParticipant(expenseBalances, selected, 'outgoing')
   const incomingByExpense = groupBalancesForParticipant(expenseBalances, selected, 'incoming')
+
+  const selectedAdjustments = pairAdjustments.filter(
+    (adjustment) => adjustment.from === selected || adjustment.to === selected,
+  )
+
+  const selectedAutoSettled = sumAmounts(selectedAdjustments)
 
   const totalOwe = sumAmounts(outgoingByExpense)
   const totalGet = sumAmounts(incomingByExpense)
@@ -878,6 +1016,25 @@ function UserDashboard({
         </div>
       </article>
 
+      {selectedAdjustments.length > 0 && (
+        <article className="panel pop-in delay-2">
+          <h3>Auto-settled offsets</h3>
+          <p className="hint">Automatically netted for you: {money.format(selectedAutoSettled)}</p>
+          <ul className="list compact-list">
+            {selectedAdjustments.map((adjustment) => {
+              const counterpartyId = adjustment.from === selected ? adjustment.to : adjustment.from
+
+              return (
+                <li key={`my-adj-${adjustment.from}-${adjustment.to}`}>
+                  <span>{participantById.get(counterpartyId)?.name || 'Unknown'}</span>
+                  <strong>{money.format(adjustment.amount)}</strong>
+                </li>
+              )
+            })}
+          </ul>
+        </article>
+      )}
+
       <article className="panel split-grid delay-2 pop-in">
         <div>
           <h3>You should pay</h3>
@@ -889,14 +1046,22 @@ function UserDashboard({
                 <li key={group.expenseId} className="expense-group">
                   <div>
                     <p className="expense-title">{group.title}</p>
+                    {group.autoSettledTotal > 0 && (
+                      <p className="hint">Auto-settled in this expense: {money.format(group.autoSettledTotal)}</p>
+                    )}
                     {group.note && <p className="hint">{group.note}</p>}
                     <ul className="list inner-list">
                       {group.items.map((item) => (
                         <li key={item.shareId}>
-                          <span>
-                            {participantById.get(item.counterpartyId)?.name || 'Unknown'}
-                            {item.kind === 'overpayment_return' ? ' (return)' : ''}
-                          </span>
+                          <div>
+                            <p className="expense-title">
+                              {participantById.get(item.counterpartyId)?.name || 'Unknown'}
+                              {item.kind === 'overpayment_return' ? ' (return)' : ''}
+                            </p>
+                            {item.autoSettled > 0 && (
+                              <p className="hint">Auto-settled: {money.format(item.autoSettled)}</p>
+                            )}
+                          </div>
                           <strong>{money.format(item.amount)}</strong>
                         </li>
                       ))}
@@ -919,14 +1084,22 @@ function UserDashboard({
                 <li key={group.expenseId} className="expense-group">
                   <div>
                     <p className="expense-title">{group.title}</p>
+                    {group.autoSettledTotal > 0 && (
+                      <p className="hint">Auto-settled in this expense: {money.format(group.autoSettledTotal)}</p>
+                    )}
                     {group.note && <p className="hint">{group.note}</p>}
                     <ul className="list inner-list">
                       {group.items.map((item) => (
                         <li key={item.shareId}>
-                          <span>
-                            {participantById.get(item.counterpartyId)?.name || 'Unknown'}
-                            {item.kind === 'overpayment_return' ? ' (return)' : ''}
-                          </span>
+                          <div>
+                            <p className="expense-title">
+                              {participantById.get(item.counterpartyId)?.name || 'Unknown'}
+                              {item.kind === 'overpayment_return' ? ' (return)' : ''}
+                            </p>
+                            {item.autoSettled > 0 && (
+                              <p className="hint">Auto-settled: {money.format(item.autoSettled)}</p>
+                            )}
+                          </div>
                           <strong>{money.format(item.amount)}</strong>
                         </li>
                       ))}
