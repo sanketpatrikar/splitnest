@@ -64,6 +64,10 @@ const money = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
 })
 
+function round2(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
 function buildSettlements(expenses, participants, payments) {
   const participantIds = new Set(participants.map((participant) => participant.id))
   const raw = new Map()
@@ -124,6 +128,59 @@ function buildSettlements(expenses, participants, payments) {
   return settlements
 }
 
+function buildExpenseBalances(expenses, participants, settlements) {
+  const participantIds = new Set(participants.map((participant) => participant.id))
+  const remainingByPair = new Map(
+    settlements.map((item) => [`${item.from}::${item.to}`, round2(item.amount)]),
+  )
+
+  const grouped = expenses
+    .map((expense) => {
+      const payer = expense.paidBy
+      if (!participantIds.has(payer)) return null
+
+      const debtors = [...new Set(expense.participantIds)]
+        .filter((id) => participantIds.has(id) && id !== payer)
+
+      if (debtors.length === 0) return null
+
+      const share = round2(Number(expense.amount) / (debtors.length + 1))
+
+      const items = debtors
+        .map((fromId) => {
+          const key = `${fromId}::${payer}`
+          const remaining = remainingByPair.get(key) || 0
+          const pending = round2(Math.min(share, remaining))
+
+          if (pending <= 0) return null
+
+          remainingByPair.set(key, round2(remaining - pending))
+
+          return {
+            from: fromId,
+            to: payer,
+            amount: pending,
+            fullShare: share,
+          }
+        })
+        .filter(Boolean)
+
+      if (items.length === 0) return null
+
+      return {
+        expenseId: expense.id,
+        title: expense.title,
+        note: expense.note,
+        amount: Number(expense.amount),
+        payer,
+        items,
+      }
+    })
+    .filter(Boolean)
+
+  return grouped
+}
+
 function App() {
   const [data, setData] = useState(INITIAL_DATA)
   const [selectedParticipantId, setSelectedParticipantId] = useState('')
@@ -170,6 +227,11 @@ function App() {
   const settlements = useMemo(
     () => buildSettlements(data.expenses, data.participants, data.payments || []),
     [data.expenses, data.participants, data.payments],
+  )
+
+  const expenseBalances = useMemo(
+    () => buildExpenseBalances(data.expenses, data.participants, settlements),
+    [data.expenses, data.participants, settlements],
   )
 
   const participantById = useMemo(() => {
@@ -328,7 +390,7 @@ function App() {
         <AdminDashboard
           participants={data.participants}
           expenses={data.expenses}
-          settlements={settlements}
+          expenseBalances={expenseBalances}
           participantById={participantById}
           onAddParticipants={addParticipants}
           onDeleteParticipant={removeParticipant}
@@ -414,7 +476,7 @@ function AdminLoginPanel({ onAdminLogin, onClose }) {
 function AdminDashboard({
   participants,
   expenses,
-  settlements,
+  expenseBalances,
   participantById,
   onAddParticipants,
   onDeleteParticipant,
@@ -673,29 +735,40 @@ function AdminDashboard({
       </article>
 
       <article className="panel full-width pop-in delay-3">
-        <h2>Open balances</h2>
-        {settlements.length === 0 ? (
+        <h2>Open balances by expense</h2>
+        {expenseBalances.length === 0 ? (
           <p className="hint">All balances are clear.</p>
         ) : (
           <ul className="expense-list">
-            {settlements.map((item) => (
-              <li key={`${item.from}-${item.to}`}>
+            {expenseBalances.map((group) => (
+              <li key={group.expenseId} className="expense-group">
                 <div>
-                  <p className="expense-title">
-                    {participantById.get(item.from)?.name || 'Unknown'} owes{' '}
-                    {participantById.get(item.to)?.name || 'Unknown'}
+                  <p className="expense-title">{group.title}</p>
+                  <p className="hint">
+                    Paid by {participantById.get(group.payer)?.name || 'Unknown'} • Total {money.format(group.amount)}
                   </p>
-                </div>
-                <div className="inline-form compact-actions">
-                  <strong>{money.format(item.amount)}</strong>
-                  <button
-                    className="primary-btn"
-                    type="button"
-                    disabled={isSaving}
-                    onClick={() => handleSettle(item)}
-                  >
-                    Mark paid
-                  </button>
+                  {group.note && <p className="hint">{group.note}</p>}
+                  <ul className="list inner-list">
+                    {group.items.map((item) => (
+                      <li key={`${group.expenseId}-${item.from}-${item.to}`}>
+                        <span>
+                          {participantById.get(item.from)?.name || 'Unknown'} owes{' '}
+                          {participantById.get(item.to)?.name || 'Unknown'}
+                        </span>
+                        <div className="inline-form compact-actions">
+                          <strong>{money.format(item.amount)}</strong>
+                          <button
+                            className="primary-btn"
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => handleSettle(item)}
+                          >
+                            Mark paid
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </li>
             ))}

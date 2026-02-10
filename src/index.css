@@ -1,12 +1,12 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Outfit:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Manrope:wght@400;500;600;700&display=swap');
 
 :root {
-  --ink: #1f3c42;
-  --muted: #58737a;
-  --surface: rgba(255, 255, 255, 0.8);
-  --line: #c6d8d1;
-  --shadow-soft: 0 10px 30px rgba(35, 78, 93, 0.14);
-  font-family: Outfit, 'Trebuchet MS', sans-serif;
+  --ink: #3a2416;
+  --muted: #71533e;
+  --surface: rgba(255, 249, 241, 0.9);
+  --line: #d9c3ab;
+  --shadow-soft: 0 12px 26px rgba(64, 36, 18, 0.16);
+  font-family: Manrope, 'Trebuchet MS', sans-serif;
   line-height: 1.5;
   font-weight: 400;
   font-synthesis: none;
@@ -25,9 +25,9 @@ body {
   min-height: 100vh;
   color: var(--ink);
   background:
-    radial-gradient(circle at 15% 20%, rgba(193, 228, 205, 0.7), transparent 40%),
-    radial-gradient(circle at 80% 0%, rgba(175, 207, 233, 0.7), transparent 45%),
-    linear-gradient(180deg, #f2f8f2 0%, #ecf4f9 100%);
+    radial-gradient(circle at 18% 14%, rgba(244, 214, 178, 0.45), transparent 38%),
+    radial-gradient(circle at 82% 2%, rgba(214, 177, 134, 0.38), transparent 44%),
+    linear-gradient(180deg, #f8efe3 0%, #f0e3d2 100%);
 }
 
 #root {
