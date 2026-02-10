@@ -16,6 +16,28 @@ const ADMIN_CREDENTIALS = {
   password: 'i_am_admin!',
 }
 
+const ADMIN_SESSION_KEY = 'splitnest-admin-session'
+
+function getStoredAdminSession() {
+  try {
+    return localStorage.getItem(ADMIN_SESSION_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function setStoredAdminSession(isActive) {
+  try {
+    if (isActive) {
+      localStorage.setItem(ADMIN_SESSION_KEY, '1')
+    } else {
+      localStorage.removeItem(ADMIN_SESSION_KEY)
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
+
 const INITIAL_DATA = {
   participants: [
     { id: 'p-alex', name: 'Alex' },
@@ -105,7 +127,7 @@ function buildSettlements(expenses, participants, payments) {
 function App() {
   const [data, setData] = useState(INITIAL_DATA)
   const [selectedParticipantId, setSelectedParticipantId] = useState('')
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(getStoredAdminSession)
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -241,6 +263,7 @@ function App() {
   const handleAdminLogout = () => {
     setIsAdmin(false)
     setIsAdminLoginOpen(false)
+    setStoredAdminSession(false)
   }
 
   if (!hasSupabaseEnv) {
@@ -288,6 +311,7 @@ function App() {
           onAdminLogin={() => {
             setIsAdmin(true)
             setIsAdminLoginOpen(false)
+            setStoredAdminSession(true)
           }}
         />
       )}
