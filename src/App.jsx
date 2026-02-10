@@ -3,7 +3,7 @@ import './App.css'
 import {
   createExpense,
   createParticipants,
-  createPayment,
+  createSharePayment,
   deleteExpense,
   deleteParticipant,
   fetchData,
@@ -50,12 +50,13 @@ const INITIAL_DATA = {
       title: 'Groceries',
       amount: 72,
       paidBy: 'p-alex',
-      participantIds: ['p-alex', 'p-maya', 'p-jordan'],
+      participantIds: ['p-maya', 'p-jordan'],
       note: 'Weekend stock-up',
       createdAt: new Date().toISOString(),
+      shares: [],
+      hasPayments: false,
     },
   ],
-  payments: [],
 }
 
 const money = new Intl.NumberFormat('en-US', {
@@ -65,120 +66,73 @@ const money = new Intl.NumberFormat('en-US', {
 })
 
 function round2(value) {
-  return Math.round((value + Number.EPSILON) * 100) / 100
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100
 }
 
-function buildSettlements(expenses, participants, payments) {
-  const participantIds = new Set(participants.map((participant) => participant.id))
-  const raw = new Map()
-
-  const addDebt = (fromId, toId, amount) => {
-    if (!raw.has(fromId)) raw.set(fromId, new Map())
-    const creditorMap = raw.get(fromId)
-    creditorMap.set(toId, (creditorMap.get(toId) || 0) + amount)
-  }
-
-  expenses.forEach((expense) => {
-    const amount = Number(expense.amount)
-    const payer = expense.paidBy
-    const debtors = expense.participantIds.filter(
-      (id) => participantIds.has(id) && id !== payer,
-    )
-
-    if (!amount || amount <= 0 || !payer || !participantIds.has(payer) || debtors.length === 0) return
-
-    const split = amount / (debtors.length + 1)
-
-    debtors.forEach((participantId) => {
-      addDebt(participantId, payer, split)
-    })
-  })
-
-  payments.forEach((payment) => {
-    const amount = Number(payment.amount)
-    if (!amount || amount <= 0) return
-    if (!participantIds.has(payment.from) || !participantIds.has(payment.to)) return
-    if (payment.from === payment.to) return
-
-    addDebt(payment.to, payment.from, amount)
-  })
-
-  const settlements = []
-  const ids = participants.map((participant) => participant.id)
-
-  for (let i = 0; i < ids.length; i += 1) {
-    for (let j = i + 1; j < ids.length; j += 1) {
-      const a = ids[i]
-      const b = ids[j]
-
-      const aToB = raw.get(a)?.get(b) || 0
-      const bToA = raw.get(b)?.get(a) || 0
-      const diff = Math.abs(aToB - bToA)
-
-      if (diff < 0.01) continue
-
-      if (aToB > bToA) {
-        settlements.push({ from: a, to: b, amount: diff })
-      } else {
-        settlements.push({ from: b, to: a, amount: diff })
-      }
-    }
-  }
-
-  return settlements
+function sumAmounts(items) {
+  return round2(items.reduce((sum, item) => sum + Number(item.amount), 0))
 }
 
-function buildExpenseBalances(expenses, participants, settlements) {
-  const participantIds = new Set(participants.map((participant) => participant.id))
-  const remainingByPair = new Map(
-    settlements.map((item) => [`${item.from}::${item.to}`, round2(item.amount)]),
-  )
+function getErrorMessage(error, fallback) {
+  if (error && typeof error.message === 'string' && error.message.length > 0) {
+    return error.message
+  }
 
-  const grouped = expenses
+  return fallback
+}
+
+function buildExpenseBalanceGroups(expenses) {
+  return expenses
     .map((expense) => {
-      const payer = expense.paidBy
-      if (!participantIds.has(payer)) return null
-
-      const debtors = [...new Set(expense.participantIds)]
-        .filter((id) => participantIds.has(id) && id !== payer)
-
-      if (debtors.length === 0) return null
-
-      const share = round2(Number(expense.amount) / (debtors.length + 1))
-
-      const items = debtors
-        .map((fromId) => {
-          const key = `${fromId}::${payer}`
-          const remaining = remainingByPair.get(key) || 0
-          const pending = round2(Math.min(share, remaining))
-
-          if (pending <= 0) return null
-
-          remainingByPair.set(key, round2(remaining - pending))
-
-          return {
-            from: fromId,
-            to: payer,
-            amount: pending,
-            fullShare: share,
-          }
-        })
-        .filter(Boolean)
+      const items = (expense.shares || [])
+        .filter((share) => Number(share.remainingAmount) > 0.009)
+        .map((share) => ({
+          shareId: share.id,
+          from: share.debtorId,
+          to: share.creditorId,
+          amount: Number(share.remainingAmount),
+          fullShare: Number(share.amount),
+          paidAmount: Number(share.paidAmount),
+          kind: share.kind,
+          shareNote: share.note || '',
+        }))
 
       if (items.length === 0) return null
 
       return {
         expenseId: expense.id,
         title: expense.title,
-        note: expense.note,
+        note: expense.note || '',
         amount: Number(expense.amount),
-        payer,
+        payer: expense.paidBy,
         items,
+        totalPending: sumAmounts(items),
       }
     })
     .filter(Boolean)
+}
 
-  return grouped
+function groupBalancesForParticipant(expenseBalances, participantId, direction) {
+  const isOutgoing = direction === 'outgoing'
+
+  return expenseBalances
+    .map((group) => {
+      const items = group.items
+        .filter((item) => (isOutgoing ? item.from === participantId : item.to === participantId))
+        .map((item) => ({
+          ...item,
+          counterpartyId: isOutgoing ? item.to : item.from,
+        }))
+
+      if (items.length === 0) return null
+
+      return {
+        ...group,
+        items,
+        amount: sumAmounts(items),
+      }
+    })
+    .filter(Boolean)
 }
 
 function App() {
@@ -201,8 +155,8 @@ function App() {
       const remoteData = await fetchData()
       setData(remoteData)
       setErrorText('')
-    } catch {
-      setErrorText('Failed to load shared data from Supabase.')
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Failed to load shared data from Supabase.'))
     } finally {
       setIsLoading(false)
     }
@@ -224,34 +178,32 @@ function App() {
     }
   }, [data.participants, selectedParticipantId])
 
-  const settlements = useMemo(
-    () => buildSettlements(data.expenses, data.participants, data.payments || []),
-    [data.expenses, data.participants, data.payments],
-  )
-
-  const expenseBalances = useMemo(
-    () => buildExpenseBalances(data.expenses, data.participants, settlements),
-    [data.expenses, data.participants, settlements],
-  )
-
   const participantById = useMemo(() => {
     const entries = data.participants.map((participant) => [participant.id, participant])
     return new Map(entries)
   }, [data.participants])
 
+  const expenseBalances = useMemo(
+    () => buildExpenseBalanceGroups(data.expenses || []),
+    [data.expenses],
+  )
+
   const addParticipants = async (names) => {
     const cleanNames = names
       .map((name) => name.trim())
       .filter(Boolean)
-    if (cleanNames.length === 0) return
+
+    if (cleanNames.length === 0) return false
 
     try {
       setIsSaving(true)
       await createParticipants(cleanNames)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to add participant(s).')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to add participant(s).'))
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -263,8 +215,10 @@ function App() {
       await createExpense(expenseInput)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to create expense.')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to create expense.'))
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -276,8 +230,10 @@ function App() {
       await updateExpense(expenseInput)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to update expense.')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to update expense.'))
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -289,8 +245,10 @@ function App() {
       await deleteParticipant(participantId)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to delete participant.')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to delete participant.'))
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -302,21 +260,25 @@ function App() {
       await deleteExpense(expenseId)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to delete expense.')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to delete expense.'))
+      return false
     } finally {
       setIsSaving(false)
     }
   }
 
-  const markSettlementPaid = async (settlement) => {
+  const recordSharePayment = async (paymentInput) => {
     try {
       setIsSaving(true)
-      await createPayment(settlement)
+      await createSharePayment(paymentInput)
       await loadData()
       setErrorText('')
-    } catch {
-      setErrorText('Unable to mark payment as settled.')
+      return true
+    } catch (error) {
+      setErrorText(getErrorMessage(error, 'Unable to record payment.'))
+      return false
     } finally {
       setIsSaving(false)
     }
@@ -380,7 +342,7 @@ function App() {
 
       <UserDashboard
         participants={data.participants}
-        settlements={settlements}
+        expenseBalances={expenseBalances}
         participantById={participantById}
         selectedParticipantId={selectedParticipantId}
         onSelectParticipant={setSelectedParticipantId}
@@ -397,7 +359,7 @@ function App() {
           onDeleteExpense={removeExpense}
           onAddExpense={addExpense}
           onEditExpense={editExpense}
-          onMarkSettlementPaid={markSettlementPaid}
+          onRecordSharePayment={recordSharePayment}
           isSaving={isSaving}
         />
       )}
@@ -483,11 +445,12 @@ function AdminDashboard({
   onDeleteExpense,
   onAddExpense,
   onEditExpense,
-  onMarkSettlementPaid,
+  onRecordSharePayment,
   isSaving,
 }) {
   const [participantName, setParticipantName] = useState('')
   const [editingExpenseId, setEditingExpenseId] = useState('')
+  const [isSplitLocked, setIsSplitLocked] = useState(false)
   const [title, setTitle] = useState('')
   const [amount, setAmount] = useState('')
   const [paidBy, setPaidBy] = useState(participants[0]?.id || '')
@@ -517,8 +480,10 @@ function AdminDashboard({
 
   const resetExpenseForm = () => {
     setEditingExpenseId('')
+    setIsSplitLocked(false)
     setTitle('')
     setAmount('')
+    setPaidBy(participants[0]?.id || '')
     setSelectedParticipants([])
     setNote('')
   }
@@ -537,6 +502,7 @@ function AdminDashboard({
 
   const startEditExpense = (expense) => {
     setEditingExpenseId(expense.id)
+    setIsSplitLocked(Boolean(expense.hasPayments))
     setTitle(expense.title)
     setAmount(String(expense.amount))
     setPaidBy(expense.paidBy)
@@ -557,7 +523,7 @@ function AdminDashboard({
     }, 900)
   }
 
-  const submitParticipant = (event) => {
+  const submitParticipant = async (event) => {
     event.preventDefault()
     const parsed = participantName
       .split(',')
@@ -566,64 +532,74 @@ function AdminDashboard({
 
     if (parsed.length === 0) return
 
-    onAddParticipants(parsed)
-    setParticipantName('')
+    const ok = await onAddParticipants(parsed)
+    if (ok) {
+      setParticipantName('')
+    }
   }
 
-  const submitExpense = (event) => {
+  const submitExpense = async (event) => {
     event.preventDefault()
 
     if (!title.trim() || !amount || !safePaidBy || validSelectedParticipants.length === 0) {
       return
     }
 
-    if (editingExpenseId) {
-      onEditExpense({
-        id: editingExpenseId,
-        title,
-        amount,
-        paidBy: safePaidBy,
-        participantIds: validSelectedParticipants,
-        note,
-      })
-      resetExpenseForm()
-      return
-    }
-
-    onAddExpense({
+    const payload = {
+      id: editingExpenseId,
       title,
       amount,
       paidBy: safePaidBy,
       participantIds: validSelectedParticipants,
       note,
-    })
+    }
 
-    resetExpenseForm()
+    const ok = editingExpenseId ? await onEditExpense(payload) : await onAddExpense(payload)
+
+    if (ok) {
+      resetExpenseForm()
+    }
   }
 
-  const handleDeleteParticipant = (participant) => {
+  const handleDeleteParticipant = async (participant) => {
     const ok = window.confirm(
       `Delete ${participant.name}? This will remove their unpaid references and any expense they paid.`,
     )
     if (!ok) return
-    onDeleteParticipant(participant.id)
+    await onDeleteParticipant(participant.id)
   }
 
-  const handleSettle = (item) => {
+  const handleRecordPayment = async (item) => {
     const fromName = participantById.get(item.from)?.name || 'Unknown'
     const toName = participantById.get(item.to)?.name || 'Unknown'
-    const ok = window.confirm(
-      `Confirm settlement: ${fromName} paid ${money.format(item.amount)} to ${toName}?`,
+
+    const promptValue = window.prompt(
+      `Enter amount paid by ${fromName} to ${toName}.\nYou can enter more than remaining; extra will be added as a reverse due.`,
+      item.amount.toFixed(2),
     )
-    if (!ok) return
-    onMarkSettlementPaid(item)
+
+    if (promptValue === null) return
+
+    const parsed = Number(promptValue)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      window.alert('Please enter a valid amount greater than zero.')
+      return
+    }
+
+    await onRecordSharePayment({
+      shareId: item.shareId,
+      from: item.from,
+      to: item.to,
+      amount: parsed,
+    })
   }
 
-  const handleDeleteExpense = (expense) => {
+  const handleDeleteExpense = async (expense) => {
     const ok = window.confirm(`Delete expense "${expense.title}"?`)
     if (!ok) return
-    onDeleteExpense(expense.id)
-    if (editingExpenseId === expense.id) {
+
+    const removed = await onDeleteExpense(expense.id)
+    if (removed && editingExpenseId === expense.id) {
       resetExpenseForm()
     }
   }
@@ -684,11 +660,17 @@ function AdminDashboard({
               value={amount}
               onChange={(event) => setAmount(event.target.value)}
               required
+              disabled={isSaving || (editingExpenseId && isSplitLocked)}
             />
           </label>
           <label>
             Paid by
-            <select value={safePaidBy} onChange={(event) => setPaidBy(event.target.value)} required>
+            <select
+              value={safePaidBy}
+              onChange={(event) => setPaidBy(event.target.value)}
+              required
+              disabled={isSaving || (editingExpenseId && isSplitLocked)}
+            >
               {participants.map((participant) => (
                 <option key={participant.id} value={participant.id}>
                   {participant.name}
@@ -700,9 +682,17 @@ function AdminDashboard({
           <fieldset>
             <legend>Included participants</legend>
             <p className="hint">Payer is excluded automatically.</p>
+            {editingExpenseId && isSplitLocked && (
+              <p className="hint">Split fields are locked because payments already exist for this expense.</p>
+            )}
             <div className="checkbox-grid">
               <label className="check-item">
-                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleSelectAll}
+                  disabled={isSaving || (editingExpenseId && isSplitLocked)}
+                />
                 All
               </label>
               {selectableParticipants.map((participant) => (
@@ -711,6 +701,7 @@ function AdminDashboard({
                     type="checkbox"
                     checked={validSelectedParticipants.includes(participant.id)}
                     onChange={() => toggleSelected(participant.id)}
+                    disabled={isSaving || (editingExpenseId && isSplitLocked)}
                   />
                   {participant.name}
                 </label>
@@ -745,27 +736,34 @@ function AdminDashboard({
                 <div>
                   <p className="expense-title">{group.title}</p>
                   <p className="hint">
-                    Paid by {participantById.get(group.payer)?.name || 'Unknown'} • Total {money.format(group.amount)}
+                    Paid by {participantById.get(group.payer)?.name || 'Unknown'} • Pending{' '}
+                    {money.format(group.totalPending)}
                   </p>
                   {group.note && <p className="hint">{group.note}</p>}
                   <ul className="list inner-list">
                     {group.items.map((item) => (
-                      <li key={`${group.expenseId}-${item.from}-${item.to}`}>
-                        <span>
-                          {participantById.get(item.from)?.name || 'Unknown'} owes{' '}
-                          {participantById.get(item.to)?.name || 'Unknown'}
-                        </span>
-                        <div className="inline-form compact-actions">
-                          <strong>{money.format(item.amount)}</strong>
-                          <button
-                            className="primary-btn"
-                            type="button"
-                            disabled={isSaving}
-                            onClick={() => handleSettle(item)}
-                          >
-                            Mark paid
-                          </button>
+                      <li key={item.shareId}>
+                        <div>
+                          <p className="expense-title">
+                            {participantById.get(item.from)?.name || 'Unknown'} owes{' '}
+                            {participantById.get(item.to)?.name || 'Unknown'}
+                          </p>
+                          <p className="hint">
+                            Original {money.format(item.fullShare)} • Paid {money.format(item.paidAmount)} • Remaining{' '}
+                            {money.format(item.amount)}
+                          </p>
+                          {item.kind === 'overpayment_return' && (
+                            <p className="hint">Overpayment return</p>
+                          )}
                         </div>
+                        <button
+                          className="primary-btn"
+                          type="button"
+                          disabled={isSaving}
+                          onClick={() => handleRecordPayment(item)}
+                        >
+                          Record payment
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -782,43 +780,44 @@ function AdminDashboard({
           <p className="hint">No expenses yet.</p>
         ) : (
           <ul className="expense-list">
-            {expenses.map((expense) => (
-              <li key={expense.id}>
-                <div>
-                  <p className="expense-title">{expense.title}</p>
-                  {(() => {
-                    const uniqueDebtors = new Set(expense.participantIds.filter((id) => id !== expense.paidBy))
-                    const splitCount = uniqueDebtors.size + 1
-                    return (
-                      <p className="hint">
-                        Paid by {participantById.get(expense.paidBy)?.name || 'Unknown'} • Split among {splitCount}{' '}
-                        (includes payer)
-                      </p>
-                    )
-                  })()}
-                  {expense.note && <p className="hint">{expense.note}</p>}
-                </div>
-                <div className="inline-form compact-actions">
-                  <strong>{money.format(expense.amount)}</strong>
-                  <button
-                    className="ghost-btn"
-                    type="button"
-                    onClick={() => startEditExpense(expense)}
-                    disabled={isSaving}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    className="danger-btn"
-                    type="button"
-                    onClick={() => handleDeleteExpense(expense)}
-                    disabled={isSaving}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </li>
-            ))}
+            {expenses.map((expense) => {
+              const splitCount = new Set(expense.participantIds.filter((id) => id !== expense.paidBy)).size + 1
+
+              return (
+                <li key={expense.id}>
+                  <div>
+                    <p className="expense-title">{expense.title}</p>
+                    <p className="hint">
+                      Paid by {participantById.get(expense.paidBy)?.name || 'Unknown'} • Split among {splitCount}{' '}
+                      (includes payer)
+                    </p>
+                    {expense.hasPayments && (
+                      <p className="hint">Payments recorded • split fields locked during edit</p>
+                    )}
+                    {expense.note && <p className="hint">{expense.note}</p>}
+                  </div>
+                  <div className="inline-form compact-actions">
+                    <strong>{money.format(expense.amount)}</strong>
+                    <button
+                      className="ghost-btn"
+                      type="button"
+                      onClick={() => startEditExpense(expense)}
+                      disabled={isSaving}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="danger-btn"
+                      type="button"
+                      onClick={() => handleDeleteExpense(expense)}
+                      disabled={isSaving}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         )}
       </article>
@@ -828,7 +827,7 @@ function AdminDashboard({
 
 function UserDashboard({
   participants,
-  settlements,
+  expenseBalances,
   participantById,
   selectedParticipantId,
   onSelectParticipant,
@@ -843,12 +842,13 @@ function UserDashboard({
   }
 
   const selected = selectedParticipantId || participants[0].id
-  const outgoing = settlements.filter((item) => item.from === selected)
-  const incoming = settlements.filter((item) => item.to === selected)
 
-  const totalOwe = outgoing.reduce((sum, item) => sum + item.amount, 0)
-  const totalGet = incoming.reduce((sum, item) => sum + item.amount, 0)
-  const net = totalGet - totalOwe
+  const outgoingByExpense = groupBalancesForParticipant(expenseBalances, selected, 'outgoing')
+  const incomingByExpense = groupBalancesForParticipant(expenseBalances, selected, 'incoming')
+
+  const totalOwe = sumAmounts(outgoingByExpense)
+  const totalGet = sumAmounts(incomingByExpense)
+  const net = round2(totalGet - totalOwe)
 
   return (
     <section className="dashboard stack pop-in">
@@ -881,14 +881,28 @@ function UserDashboard({
       <article className="panel split-grid delay-2 pop-in">
         <div>
           <h3>You should pay</h3>
-          {outgoing.length === 0 ? (
+          {outgoingByExpense.length === 0 ? (
             <p className="hint">No pending payments.</p>
           ) : (
-            <ul className="list">
-              {outgoing.map((item) => (
-                <li key={`${item.from}-${item.to}`}>
-                  <span>{participantById.get(item.to)?.name || 'Unknown'}</span>
-                  <strong>{money.format(item.amount)}</strong>
+            <ul className="expense-list">
+              {outgoingByExpense.map((group) => (
+                <li key={group.expenseId} className="expense-group">
+                  <div>
+                    <p className="expense-title">{group.title}</p>
+                    {group.note && <p className="hint">{group.note}</p>}
+                    <ul className="list inner-list">
+                      {group.items.map((item) => (
+                        <li key={item.shareId}>
+                          <span>
+                            {participantById.get(item.counterpartyId)?.name || 'Unknown'}
+                            {item.kind === 'overpayment_return' ? ' (return)' : ''}
+                          </span>
+                          <strong>{money.format(item.amount)}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <strong>{money.format(group.amount)}</strong>
                 </li>
               ))}
             </ul>
@@ -897,14 +911,28 @@ function UserDashboard({
 
         <div>
           <h3>Should receive</h3>
-          {incoming.length === 0 ? (
+          {incomingByExpense.length === 0 ? (
             <p className="hint">Nothing pending.</p>
           ) : (
-            <ul className="list">
-              {incoming.map((item) => (
-                <li key={`${item.from}-${item.to}`}>
-                  <span>{participantById.get(item.from)?.name || 'Unknown'}</span>
-                  <strong>{money.format(item.amount)}</strong>
+            <ul className="expense-list">
+              {incomingByExpense.map((group) => (
+                <li key={group.expenseId} className="expense-group">
+                  <div>
+                    <p className="expense-title">{group.title}</p>
+                    {group.note && <p className="hint">{group.note}</p>}
+                    <ul className="list inner-list">
+                      {group.items.map((item) => (
+                        <li key={item.shareId}>
+                          <span>
+                            {participantById.get(item.counterpartyId)?.name || 'Unknown'}
+                            {item.kind === 'overpayment_return' ? ' (return)' : ''}
+                          </span>
+                          <strong>{money.format(item.amount)}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <strong>{money.format(group.amount)}</strong>
                 </li>
               ))}
             </ul>
